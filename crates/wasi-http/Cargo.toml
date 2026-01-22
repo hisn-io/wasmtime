@@ -36,6 +36,7 @@ wasmtime = { workspace = true, features = ['component-model'] }
 tokio-rustls = { workspace = true, optional = true }
 rustls = { workspace = true, optional = true }
 webpki-roots = { workspace = true, optional = true }
+http-acl = { workspace = true }
 
 [dev-dependencies]
 test-programs-artifacts = { workspace = true }

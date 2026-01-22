@@ -219,6 +219,8 @@
 #![doc(test(attr(deny(warnings))))]
 #![doc(test(attr(allow(dead_code, unused_variables, unused_mut))))]
 
+pub use http_acl;
+
 mod error;
 mod http_impl;
 mod types_impl;

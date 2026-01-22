@@ -2,6 +2,7 @@ use crate::body;
 use crate::http_server::Server;
 use anyhow::{Context, Result, anyhow};
 use futures::{FutureExt, channel::oneshot, future, stream};
+use http_acl::{HttpAcl, IpNet};
 use http_body::Frame;
 use http_body_util::{BodyExt, Collected, Empty, StreamBody, combinators::BoxBody};
 use hyper::{Method, StatusCode, body::Bytes, server::conn::http1, service::service_fn};
@@ -79,6 +80,22 @@ impl WasiHttpView for Ctx {
     }
 }
 
+fn http_acl() -> HttpAcl {
+    HttpAcl::builder()
+        .non_global_ip_ranges(true)
+        .add_allowed_ip_range("127.0.0.1/8".parse::<IpNet>().unwrap())
+        .unwrap()
+        .add_allowed_ip_range("::1/128".parse::<IpNet>().unwrap())
+        .unwrap()
+        .ip_acl_default(true)
+        .host_acl_default(true)
+        .port_acl_default(true)
+        .method_acl_default(true)
+        .header_acl_default(true)
+        .url_path_acl_default(true)
+        .build()
+}
+
 fn store(engine: &Engine, server: &Server) -> Store<Ctx> {
     let stdout = MemoryOutputPipe::new(4096);
     let stderr = MemoryOutputPipe::new(4096);
@@ -91,7 +108,7 @@ fn store(engine: &Engine, server: &Server) -> Store<Ctx> {
     let ctx = Ctx {
         table: ResourceTable::new(),
         wasi: builder.build(),
-        http: WasiHttpCtx::new(),
+        http: WasiHttpCtx::new_with_acl(http_acl()),
         stderr,
         stdout,
         send_request: None,
@@ -141,7 +158,7 @@ async fn run_wasi_http(
     builder.stdout(stdout.clone());
     builder.stderr(stderr.clone());
     let wasi = builder.build();
-    let mut http = WasiHttpCtx::new();
+    let mut http = WasiHttpCtx::new_with_acl(http_acl());
     if let Some(limit) = field_size_limit {
         http.set_field_size_limit(limit);
     }

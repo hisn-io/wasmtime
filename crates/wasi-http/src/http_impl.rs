@@ -41,6 +41,29 @@ where
         let req = self.table().delete(request_id)?;
         let mut builder = hyper::Request::builder();
 
+        let acl = self.ctx().acl.clone();
+
+        let method = match req.method {
+            types::Method::Get => "GET",
+            types::Method::Head => "HEAD",
+            types::Method::Post => "POST",
+            types::Method::Put => "PUT",
+            types::Method::Delete => "DELETE",
+            types::Method::Connect => "CONNECT",
+            types::Method::Options => "OPTIONS",
+            types::Method::Trace => "TRACE",
+            types::Method::Patch => "PATCH",
+            types::Method::Other(ref m) => m,
+        };
+
+        let acl_method_match = acl.is_method_allowed(method);
+        if acl_method_match.is_denied() {
+            return Err(internal_error(format!(
+                "Method {method} is not allowed - {acl_method_match}",
+            ))
+            .into());
+        }
+
         builder = builder.method(match req.method {
             types::Method::Get => Method::GET,
             types::Method::Head => Method::HEAD,
@@ -65,7 +88,35 @@ where
             Scheme::Other(_) => return Err(types::ErrorCode::HttpProtocolError.into()),
         };
 
+        let acl_scheme_match = acl.is_scheme_allowed(scheme.as_str());
+        if acl_scheme_match.is_denied() {
+            return Err(internal_error(format!(
+                "Scheme {scheme} is not allowed - {acl_scheme_match}"
+            ))
+            .into());
+        }
+
         let authority = req.authority.unwrap_or_else(String::new);
+
+        let authority_parsed = match http_acl::utils::authority::Authority::parse(&authority) {
+            Ok(a) => a,
+            Err(e) => return Err(internal_error(format!("invalid authority: {e}")).into()),
+        };
+        let port = if authority_parsed.port == 0 {
+            match scheme.as_str() {
+                "http" => 80,
+                "https" => 443,
+                _ => unreachable!(),
+            }
+        } else {
+            authority_parsed.port
+        };
+        let acl_port_match = acl.is_port_allowed(port);
+        if acl_port_match.is_denied() {
+            return Err(
+                internal_error(format!("Port {port} is not allowed - {acl_port_match}")).into(),
+            );
+        }
 
         builder = builder.header(hyper::header::HOST, &authority);
 
@@ -74,6 +125,16 @@ where
             .authority(authority.clone());
 
         if let Some(path) = req.path_with_query {
+            if let Some(url_path) = path.split('?').next() {
+                let acl_url_path_match = acl.is_url_path_allowed(url_path);
+                if acl_url_path_match.is_denied() {
+                    return Err(internal_error(format!(
+                        "URL Path {url_path} is not allowed - {acl_url_path_match}"
+                    ))
+                    .into());
+                }
+            }
+
             uri = uri.path_and_query(path);
         }
 
@@ -100,6 +161,8 @@ where
                 connect_timeout,
                 first_byte_timeout,
                 between_bytes_timeout,
+                acl,
+                authority: authority_parsed,
             },
         )?;
 
