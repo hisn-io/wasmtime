@@ -97,16 +97,28 @@ impl<T> AccessorExt for Accessor<T, WasiFilesystem> {
 }
 
 fn systemtime_from(t: system_clock::Instant) -> Result<std::time::SystemTime, ErrorCode> {
-    if let Ok(seconds) = t.seconds.try_into() {
+    if let Ok(seconds) = <i64 as TryInto<u64>>::try_into(t.seconds) {
+        // Catch nanoseconds-into-seconds Overflow error explicitly:
+        // unfortunately, Duration::new panics when input overflows
+        let duration = core::time::Duration::new(
+            seconds
+                .checked_add(u64::from(t.nanoseconds / 1_000_000_000))
+                .ok_or(ErrorCode::Overflow)?,
+            t.nanoseconds % 1_000_000_000,
+        );
         std::time::SystemTime::UNIX_EPOCH
-            .checked_add(core::time::Duration::new(seconds, t.nanoseconds))
+            .checked_add(duration)
             .ok_or(ErrorCode::Overflow)
     } else {
+        let duration = core::time::Duration::new(
+            t.seconds
+                .unsigned_abs()
+                .checked_add(u64::from(t.nanoseconds / 1_000_000_000))
+                .ok_or(ErrorCode::Overflow)?,
+            t.nanoseconds % 1_000_000_000,
+        );
         std::time::SystemTime::UNIX_EPOCH
-            .checked_sub(core::time::Duration::new(
-                t.seconds.unsigned_abs(),
-                t.nanoseconds,
-            ))
+            .checked_sub(duration)
             .ok_or(ErrorCode::Overflow)
     }
 }
@@ -243,7 +255,7 @@ impl<D> StreamProducer<D> for ReadStreamProducer {
 }
 
 fn map_dir_entry(
-    entry: std::io::Result<cap_primitives::fs::DirEntry>,
+    entry: std::io::Result<crate::filesystem::primitives::DirEntry>,
 ) -> Result<Option<DirectoryEntry>, ErrorCode> {
     match entry {
         Ok(entry) => {
@@ -289,7 +301,7 @@ impl ReadDirStream {
         let (tx, rx) = mpsc::channel(1);
         ReadDirStream {
             task: spawn_blocking(move || {
-                let entries = cap_primitives::fs::read_base_dir(&dir)?;
+                let entries = crate::filesystem::primitives::read_base_dir(&dir)?;
                 for entry in entries {
                     if let Some(entry) = map_dir_entry(entry)? {
                         if let Err(_) = tx.blocking_send(entry) {
@@ -463,7 +475,9 @@ impl<D> StreamConsumer<D> for WriteStreamConsumer {
         let me = &mut *self;
         let task = me.task.get_or_insert_with(|| {
             debug_assert!(me.buffer.is_empty());
-            me.buffer.extend_from_slice(src.remaining());
+            let remaining = src.remaining();
+            let n = remaining.len().min(DEFAULT_BUFFER_CAPACITY);
+            me.buffer.extend_from_slice(&remaining[..n]);
             let buf = mem::take(&mut me.buffer);
             let file = Arc::clone(me.file.as_file());
             let location = me.location;
@@ -521,8 +535,17 @@ impl<U> types::HostDescriptorWithStore<U> for WasiFilesystem {
         fd: Resource<Descriptor>,
         offset: Filesize,
     ) -> wasmtime::Result<(StreamReader<u8>, FutureReader<Result<(), ErrorCode>>)> {
-        let file = get_file(store.get().table, &fd)?;
-        let file = file.clone();
+        let file = match get_descriptor(store.get().table, &fd)? {
+            Descriptor::File(file) => file.clone(),
+            Descriptor::Dir(_) => {
+                return Ok((
+                    StreamReader::new(&mut store, iter::empty())?,
+                    FutureReader::new(&mut store, async move {
+                        wasmtime::error::Ok(Err(ErrorCode::IsDirectory))
+                    })?,
+                ));
+            }
+        };
         let (result_tx, result_rx) = oneshot::channel();
         Ok((
             StreamReader::new(
@@ -665,7 +688,7 @@ impl<U> types::HostDescriptorWithStore<U> for WasiFilesystem {
                 let allow_blocking_current_thread = dir.allow_blocking_current_thread;
                 let dir = Arc::clone(dir.as_dir());
                 if allow_blocking_current_thread {
-                    match cap_primitives::fs::read_base_dir(&dir) {
+                    match crate::filesystem::primitives::read_base_dir(&dir) {
                         Ok(readdir) => StreamReader::new(
                             &mut store,
                             FallibleIteratorProducer::new(

@@ -171,7 +171,7 @@ impl HostDescriptor for WasiFilesystemCtxView<'_> {
                 // within this `block` call, rather than delay calculating the metadata
                 // for entries when they're demanded later in the iterator chain.
                 Ok::<_, std::io::Error>(
-                    cap_primitives::fs::read_base_dir(d)?
+                    crate::filesystem::primitives::read_base_dir(d)?
                         .map(|entry| {
                             let entry = entry?;
                             let meta = entry.metadata()?;
@@ -367,8 +367,12 @@ impl HostDescriptor for WasiFilesystemCtxView<'_> {
         fd: Resource<types::Descriptor>,
         offset: types::Filesize,
     ) -> FsResult<Resource<DynInputStream>> {
-        // Trap if fd lookup fails:
-        let f = self.table.get(&fd)?.file()?;
+        // Trap if fd lookup fails. A directory is is-directory, not
+        // bad-descriptor (POSIX EISDIR on read).
+        let f = match self.table.get(&fd)? {
+            Descriptor::File(f) => f,
+            Descriptor::Dir(_) => return Err(ErrorCode::IsDirectory.into()),
+        };
 
         // Create a stream view for it.
         let reader: DynInputStream = Box::new(FileInputStream::new(f, offset));
@@ -709,13 +713,21 @@ impl From<std::num::TryFromIntError> for ErrorCode {
     }
 }
 
-fn descriptortype_from(ft: cap_primitives::fs::FileType) -> types::DescriptorType {
+fn descriptortype_from(ft: crate::filesystem::primitives::FileType) -> types::DescriptorType {
     crate::filesystem::DescriptorType::from(ft).into()
 }
 
 fn systemtime_from(t: wall_clock::Datetime) -> Result<std::time::SystemTime, ErrorCode> {
+    // Catch nanoseconds-into-seconds Overflow error explicitly:
+    // unfortunately, Duration::new panics when input overflows
+    let duration = core::time::Duration::new(
+        t.seconds
+            .checked_add(u64::from(t.nanoseconds / 1_000_000_000))
+            .ok_or(ErrorCode::Overflow)?,
+        t.nanoseconds % 1_000_000_000,
+    );
     std::time::SystemTime::UNIX_EPOCH
-        .checked_add(core::time::Duration::new(t.seconds, t.nanoseconds))
+        .checked_add(duration)
         .ok_or(ErrorCode::Overflow)
 }
 

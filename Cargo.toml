@@ -219,7 +219,7 @@ exclude = [
 ]
 
 [workspace.package]
-version = "48.0.0"
+version = "48.0.5"
 authors = ["The Wasmtime Project Developers"]
 edition = "2024"
 # Wasmtime's current policy is that this number can be no larger than the
@@ -232,8 +232,8 @@ unused_extern_crates = 'warn'
 trivial_numeric_casts = 'warn'
 unstable_features = 'warn'
 unused_import_braces = 'warn'
-unused-lifetimes = 'warn'
-unused-macro-rules = 'warn'
+unused_lifetimes = 'warn'
+unused_macro_rules = 'warn'
 
 # Don't warn about unknown cfgs for our custom cfgs.
 [workspace.lints.rust.unexpected_cfgs]
@@ -280,17 +280,17 @@ extra_unused_type_parameters = 'warn'
 # tooling but aren't intended to be widely depended on.
 #
 # All of these crates are supported though in the sense that
-wasmtime = { path = "crates/wasmtime", version = "48.0.0", default-features = false }
-wasmtime-cli-flags = { path = "crates/cli-flags", version = "=48.0.0" }
-wasmtime-environ = { path = "crates/environ", version = "=48.0.0" }
-wasmtime-wasi = { path = "crates/wasi", version = "48.0.0", default-features = false }
-wasmtime-wasi-io = { path = "crates/wasi-io", version = "48.0.0", default-features = false }
-wasmtime-wasi-http = { path = "crates/wasi-http", version = "48.0.0", default-features = false }
-wasmtime-wasi-nn = { path = "crates/wasi-nn", version = "48.0.0" }
-wasmtime-wasi-config = { path = "crates/wasi-config", version = "48.0.0" }
-wasmtime-wasi-keyvalue = { path = "crates/wasi-keyvalue", version = "48.0.0" }
-wasmtime-wasi-tls = { path = "crates/wasi-tls", version = "48.0.0" }
-wasmtime-wast = { path = "crates/wast", version = "=48.0.0" }
+wasmtime = { path = "crates/wasmtime", version = "48.0.5", default-features = false }
+wasmtime-cli-flags = { path = "crates/cli-flags", version = "=48.0.5" }
+wasmtime-environ = { path = "crates/environ", version = "=48.0.5" }
+wasmtime-wasi = { path = "crates/wasi", version = "48.0.5", default-features = false }
+wasmtime-wasi-io = { path = "crates/wasi-io", version = "48.0.5", default-features = false }
+wasmtime-wasi-http = { path = "crates/wasi-http", version = "48.0.5", default-features = false }
+wasmtime-wasi-nn = { path = "crates/wasi-nn", version = "48.0.5" }
+wasmtime-wasi-config = { path = "crates/wasi-config", version = "48.0.5" }
+wasmtime-wasi-keyvalue = { path = "crates/wasi-keyvalue", version = "48.0.5" }
+wasmtime-wasi-tls = { path = "crates/wasi-tls", version = "48.0.5" }
+wasmtime-wast = { path = "crates/wast", version = "=48.0.5" }
 
 # Internal Wasmtime-specific crates.
 #
@@ -299,54 +299,54 @@ wasmtime-wast = { path = "crates/wast", version = "=48.0.0" }
 # that these are internal unsupported crates for external use. These exist as
 # part of the project organization of other public crates in Wasmtime and are
 # otherwise not supported in terms of CVEs for example.
-wasmtime-core = { path = "crates/core", version = "=48.0.0", package = 'wasmtime-internal-core' }
-wasmtime-wmemcheck = { path = "crates/wmemcheck", version = "=48.0.0", package = 'wasmtime-internal-wmemcheck' }
-wasmtime-c-api-macros = { path = "crates/c-api-macros", version = "=48.0.0", package = 'wasmtime-internal-c-api-macros' }
-wasmtime-cache = { path = "crates/cache", version = "=48.0.0", package = 'wasmtime-internal-cache' }
-wasmtime-cranelift = { path = "crates/cranelift", version = "=48.0.0", package = 'wasmtime-internal-cranelift' }
-wasmtime-winch = { path = "crates/winch", version = "=48.0.0", package = 'wasmtime-internal-winch'  }
-wasmtime-explorer = { path = "crates/explorer", version = "=48.0.0", package = 'wasmtime-internal-explorer'  }
-wasmtime-fiber = { path = "crates/fiber", version = "=48.0.0", package = 'wasmtime-internal-fiber' }
-wasmtime-jit-debug = { path = "crates/jit-debug", version = "=48.0.0", package = 'wasmtime-internal-jit-debug' }
-wasmtime-component-util = { path = "crates/component-util", version = "=48.0.0", package = 'wasmtime-internal-component-util' }
-wasmtime-component-macro = { path = "crates/component-macro", version = "=48.0.0", package = 'wasmtime-internal-component-macro' }
-wasmtime-versioned-export-macros = { path = "crates/versioned-export-macros", version = "=48.0.0", package = 'wasmtime-internal-versioned-export-macros' }
-wasmtime-jit-icache-coherence = { path = "crates/jit-icache-coherence", version = "=48.0.0", package = 'wasmtime-internal-jit-icache-coherence' }
-wasmtime-wit-bindgen = { path = "crates/wit-bindgen", version = "=48.0.0", package = 'wasmtime-internal-wit-bindgen' }
-wasmtime-unwinder = { path = "crates/unwinder", version = "=48.0.0", package = 'wasmtime-internal-unwinder' }
-wasmtime-debugger = { path = "crates/debugger", version = "=48.0.0", package = "wasmtime-internal-debugger" }
-gdbstub-component-artifact = { path = "crates/gdbstub-component/artifact", version = "=48.0.0", package = "wasmtime-internal-gdbstub-component-artifact" }
-wasmtime-wizer = { path = "crates/wizer", version = "48.0.0" }
+wasmtime-core = { path = "crates/core", version = "=48.0.5", package = 'wasmtime-internal-core' }
+wasmtime-wmemcheck = { path = "crates/wmemcheck", version = "=48.0.5", package = 'wasmtime-internal-wmemcheck' }
+wasmtime-c-api-macros = { path = "crates/c-api-macros", version = "=48.0.5", package = 'wasmtime-internal-c-api-macros' }
+wasmtime-cache = { path = "crates/cache", version = "=48.0.5", package = 'wasmtime-internal-cache' }
+wasmtime-cranelift = { path = "crates/cranelift", version = "=48.0.5", package = 'wasmtime-internal-cranelift' }
+wasmtime-winch = { path = "crates/winch", version = "=48.0.5", package = 'wasmtime-internal-winch'  }
+wasmtime-explorer = { path = "crates/explorer", version = "=48.0.5", package = 'wasmtime-internal-explorer'  }
+wasmtime-fiber = { path = "crates/fiber", version = "=48.0.5", package = 'wasmtime-internal-fiber' }
+wasmtime-jit-debug = { path = "crates/jit-debug", version = "=48.0.5", package = 'wasmtime-internal-jit-debug' }
+wasmtime-component-util = { path = "crates/component-util", version = "=48.0.5", package = 'wasmtime-internal-component-util' }
+wasmtime-component-macro = { path = "crates/component-macro", version = "=48.0.5", package = 'wasmtime-internal-component-macro' }
+wasmtime-versioned-export-macros = { path = "crates/versioned-export-macros", version = "=48.0.5", package = 'wasmtime-internal-versioned-export-macros' }
+wasmtime-jit-icache-coherence = { path = "crates/jit-icache-coherence", version = "=48.0.5", package = 'wasmtime-internal-jit-icache-coherence' }
+wasmtime-wit-bindgen = { path = "crates/wit-bindgen", version = "=48.0.5", package = 'wasmtime-internal-wit-bindgen' }
+wasmtime-unwinder = { path = "crates/unwinder", version = "=48.0.5", package = 'wasmtime-internal-unwinder' }
+wasmtime-debugger = { path = "crates/debugger", version = "=48.0.5", package = "wasmtime-internal-debugger" }
+gdbstub-component-artifact = { path = "crates/gdbstub-component/artifact", version = "=48.0.5", package = "wasmtime-internal-gdbstub-component-artifact" }
+wasmtime-wizer = { path = "crates/wizer", version = "48.0.5" }
 
 # Miscellaneous crates without a `wasmtime-*` prefix in their name but still
 # used in the `wasmtime-*` family of crates depending on various features/etc.
-wiggle = { path = "crates/wiggle", version = "=48.0.0", default-features = false }
-wiggle-macro = { path = "crates/wiggle/macro", version = "=48.0.0" }
-wiggle-generate = { path = "crates/wiggle/generate", version = "=48.0.0" }
-pulley-interpreter = { path = 'pulley', version = "=48.0.0" }
-pulley-macros = { path = 'pulley/macros', version = "=48.0.0" }
+wiggle = { path = "crates/wiggle", version = "=48.0.5", default-features = false }
+wiggle-macro = { path = "crates/wiggle/macro", version = "=48.0.5" }
+wiggle-generate = { path = "crates/wiggle/generate", version = "=48.0.5" }
+pulley-interpreter = { path = 'pulley', version = "=48.0.5" }
+pulley-macros = { path = 'pulley/macros', version = "=48.0.5" }
 
 # Cranelift crates in this workspace
-cranelift-assembler-x64 = { path = "cranelift/assembler-x64", version = "0.135.0" }
-cranelift-codegen = { path = "cranelift/codegen", version = "0.135.0", default-features = false, features = ["unwind"] }
-cranelift-frontend = { path = "cranelift/frontend", version = "0.135.0" }
-cranelift-entity = { path = "cranelift/entity", version = "0.135.0" }
-cranelift-native = { path = "cranelift/native", version = "0.135.0" }
-cranelift-module = { path = "cranelift/module", version = "0.135.0" }
-cranelift-interpreter = { path = "cranelift/interpreter", version = "0.135.0" }
-cranelift-reader = { path = "cranelift/reader", version = "0.135.0" }
+cranelift-assembler-x64 = { path = "cranelift/assembler-x64", version = "0.135.5" }
+cranelift-codegen = { path = "cranelift/codegen", version = "0.135.5", default-features = false, features = ["unwind"] }
+cranelift-frontend = { path = "cranelift/frontend", version = "0.135.5" }
+cranelift-entity = { path = "cranelift/entity", version = "0.135.5" }
+cranelift-native = { path = "cranelift/native", version = "0.135.5" }
+cranelift-module = { path = "cranelift/module", version = "0.135.5" }
+cranelift-interpreter = { path = "cranelift/interpreter", version = "0.135.5" }
+cranelift-reader = { path = "cranelift/reader", version = "0.135.5" }
 cranelift-filetests = { path = "cranelift/filetests" }
-cranelift-object = { path = "cranelift/object", version = "0.135.0" }
-cranelift-jit = { path = "cranelift/jit", version = "0.135.0" }
+cranelift-object = { path = "cranelift/object", version = "0.135.5" }
+cranelift-jit = { path = "cranelift/jit", version = "0.135.5" }
 cranelift-fuzzgen = { path = "cranelift/fuzzgen" }
-cranelift-bforest = { path = "cranelift/bforest", version = "0.135.0" }
-cranelift-bitset = { path = "cranelift/bitset", version = "0.135.0" }
-cranelift-control = { path = "cranelift/control", version = "0.135.0", default-features = false }
-cranelift-srcgen = { path = "cranelift/srcgen", version = "0.135.0" }
-cranelift = { path = "cranelift/umbrella", version = "0.135.0" }
+cranelift-bforest = { path = "cranelift/bforest", version = "0.135.5" }
+cranelift-bitset = { path = "cranelift/bitset", version = "0.135.5" }
+cranelift-control = { path = "cranelift/control", version = "0.135.5", default-features = false }
+cranelift-srcgen = { path = "cranelift/srcgen", version = "0.135.5" }
+cranelift = { path = "cranelift/umbrella", version = "0.135.5" }
 
 # Winch crates in this workspace.
-winch-codegen = { path = "winch/codegen", version = "=48.0.0" }
+winch-codegen = { path = "winch/codegen", version = "=48.0.5" }
 
 # Internal crates not published to crates.io used in testing, builds, etc
 wasi-preview1-component-adapter = { path = "crates/wasi-preview1-component-adapter" }
@@ -363,30 +363,25 @@ regalloc2 = "0.15.2"
 wasip1 = { version = "1.0.0", default-features = false }
 
 # cap-std family:
-#
-# Note that `cap-fs-ext` should be avoided where possible to use
-# `cap-primitives` instead.
 target-lexicon = "0.13.5"
-cap-primitives = "4.0.2"
-cap-fs-ext-avoid-using-this = { version = "4.0.2", package = 'cap-fs-ext' }
 rustix = "1.1.4"
 # wit-bindgen:
 wit-bindgen = { version = "0.60.0", default-features = false }
 wit-bindgen-rust-macro = { version = "0.60.0", default-features = false }
 
 # wasm-tools family:
-wasmparser = { version = "0.254.0", default-features = false, features = ['simd'] }
-wat = "1.254.0"
-wast = "254.0.0"
-wasmprinter = "0.254.0"
-wasm-encoder = "0.254.0"
-wasm-smith = "0.254.0"
-wasm-mutate = "0.254.0"
-wit-parser = "0.254.0"
-wit-component = "0.254.0"
-wasm-wave = "0.254.0"
-wasm-compose = { version = "0.254.0", default-features = false }
-json-from-wast = "0.254.0"
+wasmparser = { version = "0.254.1", default-features = false, features = ['simd'] }
+wat = "1.254.2"
+wast = "254.0.1"
+wasmprinter = "0.254.1"
+wasm-encoder = "0.254.1"
+wasm-smith = "0.254.1"
+wasm-mutate = "0.254.1"
+wit-parser = "0.254.1"
+wit-component = "0.254.1"
+wasm-wave = "0.254.1"
+wasm-compose = { version = "0.254.1", default-features = false }
+json-from-wast = "0.254.1"
 
 wstd = "0.6.5"
 wasip2 = "1.0"

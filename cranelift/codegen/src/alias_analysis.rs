@@ -38,10 +38,10 @@
 //! To get this must-alias property, we compute a sparse table of
 //! "memory values": these are known equivalences between SSA `Value`s
 //! and particular locations in memory. The memory-values table is a
-//! mapping from (last store, address expression, type) to SSA
-//! value. At a store, we can insert into this table directly. At a
-//! load, we can also insert, if we don't already have a value (from
-//! the store that produced the load's value).
+//! mapping from a memory location (address, type, byte order, etc...)
+//! to a known value. At a store, we can insert into this table
+//! directly. At a load, we can also insert, if we don't already have a
+//! value (from the store that produced the load's value).
 //!
 //! Then we do a few optimizations at once given this table:
 //!
@@ -80,7 +80,9 @@ use crate::{
     dominator_tree::DominatorTree,
     flowgraph::ControlFlowGraph,
     inst_predicates::{inst_addr_offset_type, inst_store_data, visit_block_succs},
-    ir::{AliasRegion, Block, Function, Inst, Opcode, Type, Value, immediates::Offset32},
+    ir::{
+        AliasRegion, Block, Endianness, Function, Inst, Opcode, Type, Value, immediates::Offset32,
+    },
     post_dominator_tree::PostDominatorTree,
     trace,
 };
@@ -424,6 +426,43 @@ impl LastStores {
         }
     }
 
+    /// Get the contents of `inst`'s own alias region's slot, without falling
+    /// back to the last fence.
+    ///
+    /// Returns `None` when `inst` has no alias region.
+    fn raw_region_slot(&self, func: &Function, inst: Inst) -> Option<PackedOption<Inst>> {
+        let region = func.dfg.insts[inst].alias_region(&func.dfg)?;
+        Some(self.regions[region])
+    }
+
+    /// Roll this state back to the memory version from just before `dead`,
+    /// which is a store being removed from the function by dead-store
+    /// elimination.
+    ///
+    /// `prev_region_slot` must be what `dead`'s own alias-region slot held
+    /// immediately before `dead` overwrote it, as recorded by `region_slot`
+    /// when `dead` itself was processed (that is, it must not be the last-fence
+    /// fallback).
+    ///
+    /// Only `dead`'s own alias-region slot is restored. A store with no alias
+    /// region is treated as a fence by `update`, which clears *every* region
+    /// slot, and we do not undo that; in that case, we leave this state
+    /// alone. Similarly, stores marked observed while processing `dead` stay
+    /// observed.
+    fn undo_store(&mut self, func: &Function, dead: Inst, prev_region_slot: PackedOption<Inst>) {
+        debug_assert!(func.dfg.insts[dead].opcode().can_store());
+
+        let Some(region) = func.dfg.insts[dead].alias_region(&func.dfg) else {
+            return;
+        };
+
+        // Only roll back if `dead` really is the current last store to its
+        // region.
+        if self.regions[region].expand() == Some(dead) {
+            self.regions[region] = prev_region_slot;
+        }
+    }
+
     /// Get the last-store instruction for the given `inst`'s alias region, if
     /// any.
     fn get_last_store(&self, func: &Function, inst: Inst) -> PackedOption<Inst> {
@@ -505,8 +544,9 @@ impl LastStores {
 /// instruction to touch the disjoint category of abstract state we're
 /// accessing); (ii) the address must be the same (here ensured by
 /// having the same SSA value, which doesn't change after computed);
-/// (iii) the offset must be the same; and (iv) the accessed type and
-/// extension mode (e.g., 8-to-32, signed) must be the same.
+/// (iii) the offset must be the same; (iv) the accessed type and
+/// extension mode (e.g., 8-to-32, signed) must be the same; and (v)
+/// the byte order of the two accesses must be the same.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct MemoryLoc {
     last_store: PackedOption<Inst>,
@@ -525,6 +565,46 @@ struct MemoryLoc {
     /// in place of extending loads when we know the memory value, but
     /// we haven't yet done this.
     extending_opcode: Option<Opcode>,
+    /// The byte order of this access, as explicitly specified in its memory
+    /// flags, or `None` when the access uses the target's native byte order.
+    ///
+    /// Without this, two accesses to the same address that disagree about byte
+    /// order would share a key, and we would happily forward a value from one
+    /// to the other, dropping the byte swap that the mismatch implies.
+    ///
+    /// We only record the *explicit* byte order here, rather than resolving
+    /// `None` to the target's native byte order. This keeps the pass
+    /// independent of the target, but does mean we never share a key between an
+    /// access that spells out the native byte order and one that leaves it
+    /// implicit. That scenario leads to missed optimizations, never
+    /// miscompiles, and is exceedingly rare, so we deem the trade off worth it
+    /// for simplicity.
+    endianness: Option<Endianness>,
+}
+
+/// What is known to be in memory at an associated `MemoryLoc`.
+#[derive(Clone, Copy, Debug)]
+struct KnownValue {
+    /// The value held at the associated `MemoryLoc`.
+    value: Value,
+
+    /// The instruction that produced `value`: either the load that read it out
+    /// of memory or the store that wrote it there.
+    ///
+    /// Kept around for quick dominance checks.
+    def_inst: Inst,
+
+    /// When this entry was created by a store to a particular alias region,
+    /// whatever that region's last-store slot held just *before* `def_inst`
+    /// overwrote it, as given by `LastStores::region_slot`.
+    ///
+    /// `None` means either the entry was created by a load or by a store with
+    /// no alias region. Neither will ever undo `LastStores` state.
+    ///
+    /// `Some(maybe_inst)` contains the alias region slot's previous value, so
+    /// that it can be restored if `def_inst` is a dead store that gets
+    /// eliminated.
+    prev_region_slot: Option<PackedOption<Inst>>,
 }
 
 /// The result of processing an instruction through alias analysis.
@@ -574,11 +654,8 @@ pub struct AliasAnalysis<'a> {
     block_input: FxHashMap<Block, LastStores>,
 
     /// Known memory-value equivalences. This is the result of the
-    /// analysis. This is a mapping from (last store, address
-    /// expression, offset, type) to SSA `Value`.
-    ///
-    /// We keep the defining inst around for quick dominance checks.
-    mem_values: FxHashMap<MemoryLoc, (Inst, Value)>,
+    /// analysis. This is a mapping from a memory location to its known value.
+    mem_values: FxHashMap<MemoryLoc, KnownValue>,
 }
 
 impl<'a> AliasAnalysis<'a> {
@@ -747,14 +824,51 @@ impl<'a> AliasAnalysis<'a> {
                         // layout, so drop its entry from `mem_values`. This
                         // maintains the invariant that `mem_values` only ever
                         // references instructions that are still in the layout.
+                        //
+                        // NB: the entry we are looking for was keyed on the
+                        // *dead* store's byte order, which `fully_overwrites`
+                        // does not require to match this store's byte order.
+                        // Everything else in the key does have to match, so we
+                        // can take it from this store.
                         let dead_loc = MemoryLoc {
                             last_store: last_store.into(),
                             address,
                             offset,
                             ty,
                             extending_opcode: get_ext_opcode(opcode),
+                            endianness: get_endianness(func, last_store),
                         };
-                        self.mem_values.remove(&dead_loc);
+                        let dead_entry = self.mem_values.remove(&dead_loc);
+
+                        // Roll our last-store state back to the memory version
+                        // just before the dead store, so that `state` describes
+                        // memory as if the dead store had never happened.
+                        //
+                        // Our callers remove the dead store from the layout and
+                        // then reprocess this overwriting store. Without the
+                        // rollback, that reprocessing keys its `mem_values`
+                        // lookup on the instruction we just removed, finds
+                        // nothing, and so fails to notice that the overwriter
+                        // has now become an idempotent store. Chains like
+                        //
+                        //     v1 = load.i32 region0 v0
+                        //     store region0 v2, v0  ;; dead
+                        //     store region0 v1, v0  ;; idempotent, once the
+                        //                           ;; dead store is gone
+                        //
+                        // would then need a whole additional pass over the
+                        // function to collapse each link.
+                        //
+                        // A missing entry means we have no previous version to
+                        // roll back to, and simply don't: either we never
+                        // processed the dead store as a store in this pass (it
+                        // can come from a precomputed `block_input` snapshot,
+                        // for a predecessor block we have not walked yet) or it
+                        // has no alias region and therefore no slot of its own.
+                        if let Some(prev) = dead_entry.and_then(|e| e.prev_region_slot) {
+                            state.undo_store(func, last_store, prev);
+                        }
+
                         return OptResult::DeadStore {
                             dead: last_store,
                             overwriter: inst,
@@ -768,8 +882,14 @@ impl<'a> AliasAnalysis<'a> {
                     offset,
                     ty,
                     extending_opcode: get_ext_opcode(opcode),
+                    endianness: get_endianness(func, inst),
                 };
-                if let Some((def_inst, known_value)) = self.mem_values.get(&check_loc).cloned() {
+                if let Some(KnownValue {
+                    def_inst,
+                    value: known_value,
+                    ..
+                }) = self.mem_values.get(&check_loc).cloned()
+                {
                     // Check for idempotent stores, where we are
                     // storing the exact same value back to a location
                     // that already has that value.
@@ -804,9 +924,21 @@ impl<'a> AliasAnalysis<'a> {
                     offset,
                     ty,
                     extending_opcode: get_ext_opcode(opcode),
+                    endianness: get_endianness(func, inst),
                 };
                 trace!("  --> updating known values in memory: {mem_loc:?} = {store_data}");
-                self.mem_values.insert(mem_loc, (inst, store_data));
+                self.mem_values.insert(
+                    mem_loc,
+                    KnownValue {
+                        def_inst: inst,
+                        value: store_data,
+                        // NB: we use the raw region slot, without the
+                        // last-fence fallback, because we don't want to move an
+                        // instruction without a region into a region slot on
+                        // DSE rollback.
+                        prev_region_slot: state.raw_region_slot(func, inst),
+                    },
+                );
 
                 OptResult::None
             } else if opcode.can_load() {
@@ -818,6 +950,7 @@ impl<'a> AliasAnalysis<'a> {
                     offset,
                     ty,
                     extending_opcode: get_ext_opcode(opcode),
+                    endianness: get_endianness(func, inst),
                 };
                 trace!("  load with last_store at loc {mem_loc:?}");
 
@@ -831,8 +964,9 @@ impl<'a> AliasAnalysis<'a> {
                 // load (stores will always dominate though if
                 // their `last_store` survives through
                 // meet-points to this use-site).
-                let aliased = if let Some((def_inst, value)) =
-                    self.mem_values.get(&mem_loc).cloned()
+                let aliased = if let Some(KnownValue {
+                    def_inst, value, ..
+                }) = self.mem_values.get(&mem_loc).cloned()
                 {
                     trace!("  see known value {value} from {def_inst}");
                     if self.domtree.dominates(def_inst, inst, &func.layout) {
@@ -851,7 +985,16 @@ impl<'a> AliasAnalysis<'a> {
                 // as a new equivalent value.
                 if aliased.is_none() {
                     trace!("  --> inserting load result {load_result} at loc {mem_loc:?}");
-                    self.mem_values.insert(mem_loc, (inst, load_result));
+                    self.mem_values.insert(
+                        mem_loc,
+                        KnownValue {
+                            def_inst: inst,
+                            value: load_result,
+                            // A load does not advance the memory version, so
+                            // there is no previous version to roll back to.
+                            prev_region_slot: None,
+                        },
+                    );
                 }
 
                 match aliased {
@@ -924,6 +1067,14 @@ impl<'a> AliasAnalysis<'a> {
     }
 }
 
+/// Get the explicitly-specified byte order of the given memory access,
+/// if any.
+fn get_endianness(func: &Function, inst: Inst) -> Option<Endianness> {
+    func.dfg.insts[inst]
+        .memflags_data(&func.dfg)
+        .and_then(|flags| flags.explicit_endianness())
+}
+
 fn get_ext_opcode(op: Opcode) -> Option<Opcode> {
     debug_assert!(op.can_load() || op.can_store());
     match op {
@@ -987,6 +1138,12 @@ fn fully_overwrites(
     {
         return false;
     }
+
+    // NB: unlike store-to-load forwarding and redundant-load
+    // elimination, our two stores' byte orders do *not* have to match
+    // Both write the same range of bytes, just in a different order
+    // within that range, and the overwriting store's bytes are the
+    // ones that survive either way.
 
     // Both must write the same address, offset, and type.
     match inst_addr_offset_type(func, maybe_dead) {

@@ -1206,6 +1206,71 @@ mod test_programs {
     }
 
     #[test]
+    fn p2_cli_stdout_epipe() -> Result<()> {
+        let mut child = get_wasmtime_command()?
+            .args(&["run", "-Wcomponent-model", P2_CLI_STDOUT_EPIPE_COMPONENT])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .stdin(Stdio::null())
+            .spawn()?;
+
+        // Read a small amount from stdout then drop it to close the pipe,
+        // which should cause the guest to receive StreamError::Closed (EPIPE).
+        let mut stdout = child.stdout.take().unwrap();
+        let mut buf = [0u8; 64];
+        let _ = stdout.read(&mut buf)?;
+        drop(stdout);
+
+        let output = child.wait_with_output()?;
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "guest should exit successfully after receiving Closed, stderr: {stderr}"
+        );
+        assert!(
+            stderr.contains("got expected StreamError::Closed"),
+            "guest should have reported StreamError::Closed, stderr: {stderr}"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn p2_cli_stdin_eisdir() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        // Open the directory and transfer the fd to Stdio for use as stdin.
+        let dir_file = std::fs::File::open(dir.path())?;
+        let stdin_stdio: Stdio = dir_file.into();
+
+        let child = get_wasmtime_command()?
+            .args(&["run", "-Wcomponent-model", P2_CLI_STDIN_EISDIR_COMPONENT])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .stdin(stdin_stdio)
+            .spawn()?;
+
+        let output = child.wait_with_output()?;
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "guest should exit successfully after receiving IsDirectory, stderr: {stderr}"
+        );
+        assert!(
+            stderr.contains("got expected ErrorCode::IsDirectory"),
+            "guest should have reported ErrorCode::IsDirectory, stderr: {stderr}"
+        );
+        Ok(())
+    }
+
+    // EISDIR is a Unix-specific concept; on Windows opening a directory for
+    // reading behaves differently, so this test only runs on Unix.
+    #[cfg(not(unix))]
+    #[test]
+    fn p2_cli_stdin_eisdir() -> Result<()> {
+        Ok(())
+    }
+
+    #[test]
     fn p2_cli_env() -> Result<()> {
         run_wasmtime(&[
             "run",
@@ -3011,6 +3076,35 @@ start a print 1234
         run_wasmtime(&["run", "-Stcp", P3_CLI_DENY_LISTEN_COMPONENT])?;
         Ok(())
     }
+
+    #[test]
+    fn p2_cli_stdout_write_zeros_to_sink() -> Result<()> {
+        for n in ["0", "100", "10000"] {
+            run_wasmtime(&[
+                "run",
+                "-Sinherit-stdout=n",
+                P2_CLI_STDOUT_WRITE_ZEROS_TO_SINK_COMPONENT,
+                n,
+            ])?;
+        }
+        let output = super::run_wasmtime_for_output(
+            &[
+                "run",
+                "-Sinherit-stdout=n",
+                P2_CLI_STDOUT_WRITE_ZEROS_TO_SINK_COMPONENT,
+                "10000000000",
+            ],
+            None,
+        )?;
+        assert!(!output.status.success());
+        assert_eq!(output.stdout, b"");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("cannot write more zeroes than `check_write` allows"),
+            "bad stderr: {stderr}"
+        );
+        Ok(())
+    }
 }
 
 #[test]
@@ -3649,5 +3743,59 @@ fn non_utf8_raises_error() -> Result<()> {
             bail!("should have failed: {output:?}")
         }
     }
+    Ok(())
+}
+
+#[test]
+fn compile_empty_component_with_debug_info() -> Result<()> {
+    // A component with no core modules reached simulated-DWARF generation with
+    // nothing to describe, which used to panic instead of compiling.
+    let td = TempDir::new()?;
+    let cwasm = td.path().join("empty-component.cwasm");
+    let stdout = run_wasmtime(&[
+        "compile",
+        "-D",
+        "debug-info=y",
+        "tests/all/cli_tests/empty_component.wat",
+        "-o",
+        cwasm.to_str().unwrap(),
+    ])?;
+    assert_eq!(stdout, "");
+    Ok(())
+}
+
+#[test]
+fn hostcall_fuel() -> Result<()> {
+    for func in ["f1()", "f2()", "f3()", "f4()", "f5()", "f6()", "f7()"] {
+        run_wasmtime(&[
+            "--invoke",
+            func,
+            "tests/all/cli_tests/hostcall_fuel.wat",
+            func,
+        ])?;
+        assert!(
+            run_wasmtime(&[
+                "-Shostcall-fuel=1000",
+                "--invoke",
+                func,
+                "tests/all/cli_tests/hostcall_fuel.wat",
+                func,
+            ])
+            .is_err()
+        );
+    }
+    Ok(())
+}
+
+#[test]
+#[cfg_attr(target_pointer_width = "32", ignore)] // this test takes 4GiB virtual memory
+fn wasi_snapshot0_poll_oneoff_hostcall_fuel() -> Result<()> {
+    let stdout = run_wasmtime(&[
+        "run",
+        "-Shostcall-fuel=1000",
+        "--invoke=run",
+        "tests/all/cli_tests/poll-oneoff.wat",
+    ])?;
+    assert_eq!(stdout, "48\n"); // `errno::nomem`
     Ok(())
 }
