@@ -27,6 +27,9 @@ use {
         error::{dns_error, internal_error},
         hyper_request_error,
     },
+    core::convert::Infallible,
+    http_acl::mutation::{RequestMutation, ResponseMutation},
+    http_body_util::Full,
     std::net::SocketAddr,
     tokio::net::TcpStream,
     tokio::time::timeout,
@@ -439,13 +442,18 @@ pub async fn default_send_request_handler(
         return Err(types::ErrorCode::HttpRequestUriInvalid);
     };
 
-    let mut static_dns_mapping = false;
+    // Only ever `true` for a *trusted* static mapping: a regular static
+    // mapping still needs its one address checked below, same as any
+    // genuinely resolved address (matches the release-48 fork).
+    let mut trusted_static_mapping = false;
 
     let tcp_addresses = match &authority_parsed.host {
         http_acl::utils::authority::Host::Domain(domain) => {
-            if let Some(tcp_address) = acl.resolve_static_dns_mapping(domain) {
-                static_dns_mapping = true;
+            if let Some(tcp_address) = acl.resolve_trusted_static_dns_mapping(domain) {
+                trusted_static_mapping = true;
 
+                vec![tcp_address]
+            } else if let Some(tcp_address) = acl.resolve_static_dns_mapping(domain) {
                 vec![tcp_address]
             } else {
                 let acl_host_match = acl.is_host_allowed(domain);
@@ -484,7 +492,7 @@ pub async fn default_send_request_handler(
         return Err(dns_error("dns lookup error".to_string(), 0));
     }
 
-    if !static_dns_mapping {
+    if !trusted_static_mapping {
         for tcp_address in &tcp_addresses {
             let acl_ip_match = acl.is_ip_allowed(&tcp_address.ip());
             if acl_ip_match.is_denied() {
@@ -595,17 +603,93 @@ pub async fn default_send_request_handler(
         .build()
         .expect("comes from valid request");
 
+    let scheme_str = if use_tls { "https" } else { "http" };
+
+    // The request body is only read into memory when a `ModifyRequestFn` is
+    // attached; otherwise the request goes out untouched.
+    let request = if acl.has_modify_request() {
+        let (mut parts, body) = request.into_parts();
+        let body_bytes = body.collect().await?.to_bytes();
+        let mut mutation = RequestMutation {
+            headers: header_pairs(&parts.headers),
+            body: Some(body_bytes),
+        };
+        acl.modify_request(scheme_str, &authority_parsed, &mut mutation);
+        parts.headers = header_map(&mutation.headers)?;
+        hyper::Request::from_parts(
+            parts,
+            Full::new(mutation.body.unwrap_or_default())
+                .map_err(|never: Infallible| match never {})
+                .boxed(),
+        )
+    } else {
+        request
+    };
+
     let resp = timeout(first_byte_timeout, sender.send_request(request))
         .await
         .map_err(|_| types::ErrorCode::ConnectionReadTimeout)?
         .map_err(hyper_request_error)?
         .map(|body| body.map_err(hyper_request_error).boxed());
 
+    // The response body is only read into memory when a `ModifyResponseFn`
+    // is attached. The connection is driven by `worker`, already spawned, so
+    // collecting here cannot stall it.
+    let resp = if acl.has_modify_response() {
+        let (mut parts, body) = resp.into_parts();
+        let body_bytes = body.collect().await?.to_bytes();
+        let mut mutation = ResponseMutation {
+            status: parts.status.as_u16(),
+            headers: header_pairs(&parts.headers),
+            body: body_bytes,
+        };
+        acl.modify_response(scheme_str, &authority_parsed, &mut mutation);
+        parts.status = http::StatusCode::from_u16(mutation.status)
+            .map_err(|_| internal_error(format!("invalid status code {}", mutation.status)))?;
+        parts.headers = header_map(&mutation.headers)?;
+        hyper::Response::from_parts(
+            parts,
+            Full::new(mutation.body)
+                .map_err(|never: Infallible| match never {})
+                .boxed(),
+        )
+    } else {
+        resp
+    };
+
     Ok(IncomingResponse {
         resp,
         worker: Some(worker),
         between_bytes_timeout,
     })
+}
+
+/// The headers as the name/value pairs http-acl's mutation hooks work on.
+#[cfg(feature = "default-send-request")]
+fn header_pairs(headers: &HeaderMap) -> Vec<(String, String)> {
+    headers
+        .iter()
+        .map(|(k, v)| {
+            (
+                k.as_str().to_string(),
+                String::from_utf8_lossy(v.as_bytes()).into_owned(),
+            )
+        })
+        .collect()
+}
+
+/// Rebuilds a header map from the pairs a mutation hook left behind.
+#[cfg(feature = "default-send-request")]
+fn header_map(pairs: &[(String, String)]) -> Result<HeaderMap, types::ErrorCode> {
+    let mut headers = HeaderMap::new();
+    for (name, value) in pairs {
+        let name = HeaderName::from_bytes(name.as_bytes())
+            .map_err(|_| internal_error(format!("invalid header name `{name}`")))?;
+        let value = HeaderValue::from_str(value)
+            .map_err(|_| internal_error(format!("invalid header value for `{name}`")))?;
+        headers.append(name, value);
+    }
+    Ok(headers)
 }
 
 impl From<http::Method> for types::Method {
@@ -983,5 +1067,153 @@ impl Pollable for HostFutureIncomingResponse {
         if let Self::Pending(handle) = self {
             *self = Self::Ready(handle.await);
         }
+    }
+}
+
+/// The http-acl hooks and trusted static mappings, ported from the release-48
+/// fork (mirrors its `modify_hooks_tests`).
+#[cfg(all(test, feature = "default-send-request"))]
+mod acl_parity_tests {
+    use super::{OutgoingRequestConfig, default_send_request_handler};
+    use crate::bindings::http::types::ErrorCode;
+    use bytes::Bytes;
+    use http_acl::{HttpAcl, HttpAclHooks, utils::authority::Authority};
+    use http_body_util::{BodyExt, Full};
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    async fn serve(response: &'static str) -> (u16, tokio::sync::oneshot::Receiver<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            if let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = [0u8; 4096];
+                let n = socket.read(&mut buf).await.unwrap_or(0);
+                let _ = tx.send(String::from_utf8_lossy(&buf[..n]).into_owned());
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+        (port, rx)
+    }
+
+    fn config(acl: HttpAcl, port: u16) -> OutgoingRequestConfig {
+        OutgoingRequestConfig {
+            use_tls: false,
+            connect_timeout: Duration::from_secs(5),
+            first_byte_timeout: Duration::from_secs(5),
+            between_bytes_timeout: Duration::from_secs(5),
+            acl: Arc::new(acl),
+            authority: Authority::parse(&format!("127.0.0.1:{port}")).unwrap(),
+        }
+    }
+
+    fn request(uri: String) -> hyper::Request<crate::body::HyperOutgoingBody> {
+        http::Request::builder()
+            .method("GET")
+            .uri(uri)
+            .body(
+                Full::new(Bytes::new())
+                    .map_err(|e: std::convert::Infallible| match e {})
+                    .boxed(),
+            )
+            .unwrap()
+    }
+
+    fn base() -> http_acl::HttpAclBuilder {
+        HttpAcl::builder()
+            .non_global_ip_ranges(true)
+            .ip_acl_default(true)
+            .port_acl_default(true)
+            .host_acl_default(true)
+    }
+
+    #[tokio::test]
+    async fn modify_request_and_response_hooks_are_applied() {
+        let (port, captured) =
+            serve("HTTP/1.1 200 OK\r\nx-remove-me: yes\r\nContent-Length: 13\r\n\r\noriginal body")
+                .await;
+        let acl = base().build_full(HttpAclHooks {
+            modify_request_fn: Some(Arc::new(|_s, _a, m| {
+                m.headers.push(("x-injected-secret".into(), "sssh".into()));
+            })),
+            modify_response_fn: Some(Arc::new(|_s, _a, m| {
+                m.status = 201;
+                m.headers.retain(|(k, _)| k != "x-remove-me");
+                m.body = Bytes::from_static(b"redacted body");
+            })),
+            ..Default::default()
+        });
+        let res = default_send_request_handler(
+            request(format!("http://127.0.0.1:{port}/")),
+            config(acl, port),
+        )
+        .await
+        .unwrap();
+        assert_eq!(res.resp.status(), 201);
+        assert!(!res.resp.headers().contains_key("x-remove-me"));
+        let body = res.resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], b"redacted body");
+        let captured = captured.await.unwrap().to_lowercase();
+        assert!(captured.contains("x-injected-secret: sssh"), "{captured}");
+    }
+
+    #[tokio::test]
+    async fn no_hooks_configured_is_unaffected() {
+        let (port, _captured) = serve("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok").await;
+        let acl = base().build();
+        assert!(!acl.has_modify_request() && !acl.has_modify_response());
+        let res = default_send_request_handler(
+            request(format!("http://127.0.0.1:{port}/")),
+            config(acl, port),
+        )
+        .await
+        .unwrap();
+        assert_eq!(res.resp.status(), 200);
+        let body = res.resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], b"ok");
+    }
+
+    #[tokio::test]
+    async fn a_regular_static_mapping_is_still_ip_checked_and_a_trusted_one_is_not() {
+        let (port, _c) = serve("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok").await;
+        let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+        let cfg = |acl: HttpAcl| OutgoingRequestConfig {
+            authority: Authority::parse(&format!("svc.internal:{port}")).unwrap(),
+            ..config(acl, port)
+        };
+        let deny_local = || {
+            HttpAcl::builder()
+                .non_global_ip_ranges(false)
+                .ip_acl_default(true)
+                .port_acl_default(true)
+                .host_acl_default(true)
+        };
+        let regular = deny_local()
+            .add_static_dns_mapping("svc.internal".into(), addr)
+            .unwrap()
+            .build();
+        let err = default_send_request_handler(
+            request(format!("http://svc.internal:{port}/")),
+            cfg(regular),
+        )
+        .await
+        .err()
+        .expect("a regular mapping to loopback must be refused");
+        assert!(matches!(err, ErrorCode::InternalError(_)), "{err:?}");
+
+        let trusted = deny_local()
+            .add_trusted_static_dns_mapping("svc.internal".into(), addr)
+            .unwrap()
+            .build();
+        let res = default_send_request_handler(
+            request(format!("http://svc.internal:{port}/")),
+            cfg(trusted),
+        )
+        .await
+        .unwrap();
+        assert_eq!(res.resp.status(), 200);
     }
 }
