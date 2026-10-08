@@ -124,17 +124,30 @@ where
             .scheme(scheme)
             .authority(authority.clone());
 
-        if let Some(path) = req.path_with_query {
-            if let Some(url_path) = path.split('?').next() {
-                let acl_url_path_match = acl.is_url_path_allowed(url_path);
-                if acl_url_path_match.is_denied() {
-                    return Err(internal_error(format!(
-                        "URL Path {url_path} is not allowed - {acl_url_path_match}"
-                    ))
-                    .into());
-                }
-            }
+        // The ACL sees the path the way the server will: percent-decoded, with dot
+        // segments resolved (http-acl 0.12 does the same in its reqwest middleware).
+        // Matching the raw path let `/%61dmin` or `/x/../admin` past a denied `/admin`.
+        // A request without a path is sent to `/`, so `/` is what is checked.
+        let raw_path = req.path_with_query.as_deref().unwrap_or("/");
+        let raw_path = raw_path.split(['?', '#']).next().unwrap_or("");
+        let separator = if raw_path.starts_with('/') { "" } else { "/" };
+        let Some(url_path) = http_acl::utils::url::get_url_path(&format!(
+            "http://acl.invalid{separator}{raw_path}"
+        )) else {
+            return Err(internal_error(format!(
+                "URL Path {raw_path} is not allowed - invalid path"
+            ))
+            .into());
+        };
+        let acl_url_path_match = acl.is_url_path_allowed(&url_path);
+        if acl_url_path_match.is_denied() {
+            return Err(internal_error(format!(
+                "URL Path {url_path} is not allowed - {acl_url_path_match}"
+            ))
+            .into());
+        }
 
+        if let Some(path) = req.path_with_query {
             uri = uri.path_and_query(path);
         }
 
