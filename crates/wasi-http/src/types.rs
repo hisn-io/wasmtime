@@ -531,8 +531,17 @@ pub async fn default_send_request_handler(
         let root_cert_store = rustls::RootCertStore {
             roots: webpki_roots::TLS_SERVER_ROOTS.into(),
         };
-        let config = rustls::ClientConfig::builder()
-            .with_root_certificates(root_cert_store)
+        // Name the provider rather than rely on the process default, which rustls 0.23
+        // cannot pick when a dependent enables both the ring and aws-lc-rs features.
+        let config = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
+            rustls::crypto::aws_lc_rs::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .map_err(|e| {
+            tracing::warn!("tls config error: {e:?}");
+            types::ErrorCode::TlsProtocolError
+        })?
+        .with_root_certificates(root_cert_store)
             .with_no_client_auth();
         let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(config));
         let mut parts = authority.split(":");
