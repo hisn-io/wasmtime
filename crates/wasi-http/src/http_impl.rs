@@ -58,6 +58,7 @@ where
 
         let acl_method_match = acl.is_method_allowed(method);
         if acl_method_match.is_denied() {
+            self.acl_denied("method", &acl_host(req.authority.as_deref()));
             return Err(internal_error(format!(
                 "Method {method} is not allowed - {acl_method_match}",
             ))
@@ -90,6 +91,7 @@ where
 
         let acl_scheme_match = acl.is_scheme_allowed(scheme.as_str());
         if acl_scheme_match.is_denied() {
+            self.acl_denied("scheme", &acl_host(req.authority.as_deref()));
             return Err(internal_error(format!(
                 "Scheme {scheme} is not allowed - {acl_scheme_match}"
             ))
@@ -113,6 +115,7 @@ where
         };
         let acl_port_match = acl.is_port_allowed(port);
         if acl_port_match.is_denied() {
+            self.acl_denied("port", &authority_parsed.host.to_string());
             return Err(
                 internal_error(format!("Port {port} is not allowed - {acl_port_match}")).into(),
             );
@@ -134,6 +137,7 @@ where
         let Some(url_path) = http_acl::utils::url::get_url_path(&format!(
             "http://acl.invalid{separator}{raw_path}"
         )) else {
+            self.acl_denied("path", &authority_parsed.host.to_string());
             return Err(internal_error(format!(
                 "URL Path {raw_path} is not allowed - invalid path"
             ))
@@ -141,6 +145,7 @@ where
         };
         let acl_url_path_match = acl.is_url_path_allowed(&url_path);
         if acl_url_path_match.is_denied() {
+            self.acl_denied("path", &authority_parsed.host.to_string());
             return Err(internal_error(format!(
                 "URL Path {url_path} is not allowed - {acl_url_path_match}"
             ))
@@ -180,5 +185,165 @@ where
         )?;
 
         Ok(self.table().push(future)?)
+    }
+}
+
+/// The host part of a request's authority, for [`WasiHttpView::acl_denied`] on a denial found
+/// before the authority is parsed; empty when there is none or it does not parse.
+fn acl_host(authority: Option<&str>) -> String {
+    authority
+        .and_then(|a| http_acl::utils::authority::Authority::parse(a).ok())
+        .map(|a| a.host.to_string())
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        WasiHttpCtx,
+        types::{FieldMap, HostFutureIncomingResponse, OutgoingRequestConfig},
+    };
+    use http_acl::HttpAcl;
+    use wasmtime::component::ResourceTable;
+
+    /// A view that records each ACL denial the fork reports, and each request that got as far
+    /// as `send_request`.
+    struct Recorder {
+        ctx: WasiHttpCtx,
+        table: ResourceTable,
+        denials: Vec<(&'static str, String)>,
+        sent: usize,
+    }
+
+    impl WasiHttpView for Recorder {
+        fn ctx(&mut self) -> &mut WasiHttpCtx {
+            &mut self.ctx
+        }
+
+        fn table(&mut self) -> &mut ResourceTable {
+            &mut self.table
+        }
+
+        fn send_request(
+            &mut self,
+            _request: hyper::Request<crate::body::HyperOutgoingBody>,
+            _config: OutgoingRequestConfig,
+        ) -> crate::HttpResult<HostFutureIncomingResponse> {
+            self.sent += 1;
+            Err(internal_error("not sent in this test".to_string()).into())
+        }
+
+        fn acl_denied(&mut self, reason: &'static str, host: &str) {
+            self.denials.push((reason, host.to_string()));
+        }
+    }
+
+    fn handle(
+        acl: HttpAcl,
+        method: types::Method,
+        scheme: Scheme,
+        authority: &str,
+        path: &str,
+    ) -> (Vec<(&'static str, String)>, usize) {
+        let mut view = Recorder {
+            ctx: WasiHttpCtx::new_with_acl(acl),
+            table: ResourceTable::new(),
+            denials: Vec::new(),
+            sent: 0,
+        };
+        let request = view
+            .table
+            .push(HostOutgoingRequest {
+                method,
+                scheme: Some(scheme),
+                authority: Some(authority.to_string()),
+                path_with_query: Some(path.to_string()),
+                headers: FieldMap::empty(usize::MAX),
+                body: None,
+            })
+            .unwrap();
+        let result = outgoing_handler::Host::handle(&mut WasiHttpImpl(&mut view), request, None);
+        assert!(result.is_err());
+        (view.denials, view.sent)
+    }
+
+    fn acl() -> http_acl::HttpAclBuilder {
+        HttpAcl::builder()
+            .ip_acl_default(true)
+            .host_acl_default(true)
+            .port_acl_default(true)
+            .method_acl_default(true)
+            .header_acl_default(true)
+            .url_path_acl_default(true)
+    }
+
+    fn denial(reason: &'static str) -> Vec<(&'static str, String)> {
+        vec![(reason, "example.com".to_string())]
+    }
+
+    #[test]
+    fn denied_method_is_reported() {
+        let acl = acl()
+            .clear_allowed_methods()
+            .add_denied_method("DELETE")
+            .unwrap()
+            .build();
+        let got = handle(
+            acl,
+            types::Method::Delete,
+            Scheme::Https,
+            "example.com",
+            "/",
+        );
+        assert_eq!(got, (denial("method"), 0));
+    }
+
+    #[test]
+    fn denied_scheme_is_reported() {
+        let acl = acl().http(false).build();
+        let got = handle(acl, types::Method::Get, Scheme::Http, "example.com", "/");
+        assert_eq!(got, (denial("scheme"), 0));
+    }
+
+    #[test]
+    fn denied_port_is_reported() {
+        let acl = acl().add_denied_port_range(8080..=8080).unwrap().build();
+        let got = handle(
+            acl,
+            types::Method::Get,
+            Scheme::Https,
+            "example.com:8080",
+            "/",
+        );
+        assert_eq!(got, (denial("port"), 0));
+    }
+
+    #[test]
+    fn denied_path_is_reported() {
+        let acl = acl()
+            .add_denied_url_path("/admin".to_string())
+            .unwrap()
+            .build();
+        let got = handle(
+            acl,
+            types::Method::Get,
+            Scheme::Https,
+            "example.com",
+            "/%61dmin",
+        );
+        assert_eq!(got, (denial("path"), 0));
+    }
+
+    #[test]
+    fn allowed_request_reports_nothing() {
+        let got = handle(
+            acl().build(),
+            types::Method::Get,
+            Scheme::Https,
+            "example.com",
+            "/",
+        );
+        assert_eq!(got, (Vec::new(), 1));
     }
 }

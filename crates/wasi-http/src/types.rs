@@ -214,6 +214,17 @@ pub trait WasiHttpView {
     fn outgoing_body_chunk_size(&mut self) -> usize {
         DEFAULT_OUTGOING_BODY_CHUNK_SIZE
     }
+
+    /// Called when the outbound ACL refuses a request's method, scheme, port or URL path,
+    /// before the error goes back to the guest. Those checks run here, before
+    /// [`WasiHttpView::send_request`], so this is the only place the host sees them.
+    ///
+    /// `reason` is one of `"method"`, `"scheme"`, `"port"` or `"path"`; `host` is the
+    /// request's host without its port, or empty when the authority does not parse.
+    /// Default: does nothing.
+    fn acl_denied(&mut self, reason: &'static str, host: &str) {
+        let _ = (reason, host);
+    }
 }
 
 /// The default value configured for [`WasiHttpView::outgoing_body_buffer_chunks`] in [`WasiHttpView`].
@@ -258,6 +269,10 @@ impl<T: ?Sized + WasiHttpView> WasiHttpView for &mut T {
     fn outgoing_body_chunk_size(&mut self) -> usize {
         T::outgoing_body_chunk_size(self)
     }
+
+    fn acl_denied(&mut self, reason: &'static str, host: &str) {
+        T::acl_denied(self, reason, host)
+    }
 }
 
 impl<T: ?Sized + WasiHttpView> WasiHttpView for Box<T> {
@@ -296,6 +311,10 @@ impl<T: ?Sized + WasiHttpView> WasiHttpView for Box<T> {
 
     fn outgoing_body_chunk_size(&mut self) -> usize {
         T::outgoing_body_chunk_size(self)
+    }
+
+    fn acl_denied(&mut self, reason: &'static str, host: &str) {
+        T::acl_denied(self, reason, host)
     }
 }
 
@@ -350,6 +369,10 @@ impl<T: WasiHttpView> WasiHttpView for WasiHttpImpl<T> {
 
     fn outgoing_body_chunk_size(&mut self) -> usize {
         self.0.outgoing_body_chunk_size()
+    }
+
+    fn acl_denied(&mut self, reason: &'static str, host: &str) {
+        self.0.acl_denied(reason, host)
     }
 }
 
@@ -542,7 +565,7 @@ pub async fn default_send_request_handler(
             types::ErrorCode::TlsProtocolError
         })?
         .with_root_certificates(root_cert_store)
-            .with_no_client_auth();
+        .with_no_client_auth();
         let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(config));
         let mut parts = authority.split(":");
         let host = parts.next().unwrap_or(&authority);
